@@ -1,76 +1,113 @@
-name: Build GKI 6.6.77 (KSU + SUSFS)
+name: Build GKI A15 6.6.77 (KSU + SUSFS)
 
 on:
   workflow_dispatch:
     inputs:
-      kernel_version:
-        description: 'Kernel Version Tag (e.g., ASB-2024-05-05_15-6.6)'
+      MANIFEST_URL:
+        description: 'AOSP Kernel Manifest URL'
+        required: true
+        default: 'https://android.googlesource.com/kernel/manifest'
+      MANIFEST_BRANCH:
+        description: 'AOSP Branch or Tag (e.g., common-android15-6.6)'
         required: true
         default: 'common-android15-6.6'
-      ksu_manager_version:
-        description: 'KernelSU Manager Version'
+      KSU_MANAGER_VER:
+        description: 'KernelSU Manager Version Override'
         required: true
         default: '40545'
 
 jobs:
-  build-kernel:
-    name: Build GKI 6.6.77
+  build:
+    name: Build GKI A15 6.6
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Maximize Build Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h
 
       - name: Setup Build Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc curl git python3 libssl-dev zip unzip repo
+          sudo apt-get install -y build-essential bc curl git python3 libssl-dev zip unzip repo cpio rsync
+
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
 
-      - name: Sync GKI Source (6.6)
+      - name: Sync GKI 6.6 Source
         run: |
-          mkdir -p workspace && cd workspace
-          # 使用 Android 15 6.6 的通用分支，你可以将 input 替换为 6.6.77 的具体 tag
-          repo init -u https://android.googlesource.com/kernel/manifest -b ${{ github.event.inputs.kernel_version }} --depth=1
+          mkdir -p android-kernel && cd android-kernel
+          # 使用 --depth=1 节省空间和同步时间。如果需要 6.6.77 的特定 ASB Tag，可以在触发时修改 MANIFEST_BRANCH
+          repo init -u ${{ github.event.inputs.MANIFEST_URL }} -b ${{ github.event.inputs.MANIFEST_BRANCH }} --depth=1
           repo sync -c -j$(nproc --all) --no-tags --force-sync
 
-      - name: Setup KernelSU & SUSFS
+      - name: Integrate KernelSU & Override Manager Version
         run: |
-          cd workspace/common
+          cd android-kernel/common
           
-          # 1. 引入 KernelSU
+          # 拉取 KernelSU 源码
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
-          
-          # 2. 强制修改 KernelSU 版本以适配 40545 管理器
+
+          # 针对 40545 版本管理器进行硬编码适配
           cd KernelSU
-          echo "${{ github.event.inputs.ksu_manager_version }}" > VERSION
-          # 替换 Makefile 中的版本号逻辑，强制返回 40545
-          sed -i 's/$(shell.*)/${{ github.event.inputs.ksu_manager_version }}/g' Makefile
+          echo "Overriding KernelSU version to ${{ github.event.inputs.KSU_MANAGER_VER }}"
+          echo "${{ github.event.inputs.KSU_MANAGER_VER }}" > VERSION
+          
+          # 修改 Makefile，强制 KSU_VERSION 为 40545
+          sed -i 's/ccflags-y += -DKSU_VERSION=.*/ccflags-y += -DKSU_VERSION=\"${{ github.event.inputs.KSU_MANAGER_VER }}\"/' Makefile
+          sed -i 's/$(shell.*)/${{ github.event.inputs.KSU_MANAGER_VER }}/g' Makefile
           cd ..
 
-          # 3. 引入 SUSFS 补丁
-          # 注意：请根据你当前仓库 /assets/ 或 /scripts/ 目录下的 SUSFS 补丁路径进行调整
-          echo "Applying SUSFS patches..."
-          # 假设你的仓库根目录下有 susfs 补丁，此处将补丁复制并应用
-          # cp ../../susfs_patches/*.patch ./
-          # patch -p1 < susfs_core.patch
-
-      - name: Build Kernel
+      - name: Integrate SUSFS
         run: |
-          cd workspace
-          # 编译 aarch64 架构的 GKI
-          LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh -j$(nproc --all)
+          # 假设当前 GitHub 仓库中包含 susfs 的源码/补丁目录 (与 LantoZheng 仓库结构类似)
+          # 复制 SUSFS 源码到内核树
+          cp -r ${GITHUB_WORKSPACE}/susfs/kernel_patches/fs/* android-kernel/common/fs/
+          cp -r ${GITHUB_WORKSPACE}/susfs/kernel_patches/include/linux/* android-kernel/common/include/linux/
+          
+          cd android-kernel/common
+          
+          # 应用 SUSFS 针对 Kernel 6.6 的补丁
+          echo "Applying SUSFS 6.6 patches..."
+          patch -p1 < ${GITHUB_WORKSPACE}/susfs/kernel_patches/50_recipe_susfs.patch
+          patch -p1 < ${GITHUB_WORKSPACE}/susfs/kernel_patches/susfs_core.patch
+          
+          # 如果有专门针对 KernelSU 的 SUSFS 钩子补丁，也在此处应用
+          # patch -p1 < ${GITHUB_WORKSPACE}/susfs/kernel_patches/susfs_ksu.patch
 
-      - name: Package AnyKernel3
+      - name: Build Kernel (Bazel / Kleaf)
+        run: |
+          cd android-kernel
+          # A15 6.6 必须使用 Bazel 进行构建
+          echo "Starting Bazel build..."
+          tools/bazel run //common:kernel_aarch64_dist -- --destdir out/dist
+
+      - name: Package with AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git ak3
-          cp workspace/out/mixed/dist/Image ak3/
+          
+          # 复制生成的 Image 文件
+          cp android-kernel/out/dist/Image ak3/
+          
           cd ak3
-          zip -r9 ../GKI-6.6.77-KernelSU-${{ github.event.inputs.ksu_manager_version }}-SUSFS.zip * -x .git README.md *placeholder
+          # 移除不必要的文件
+          rm -rf .git README.md *placeholder
+          
+          # 打包
+          zip -r9 ../GKI-6.6.77-KSU_${{ github.event.inputs.KSU_MANAGER_VER }}-SUSFS.zip *
 
-      - name: Upload Artifacts
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: GKI-6.6.77-KSU-40545-SUSFS
-          path: GKI-6.6.77-KernelSU-*.zip
+          path: GKI-6.6.77-KSU_${{ github.event.inputs.KSU_MANAGER_VER }}-SUSFS.zip
