@@ -58,14 +58,20 @@ jobs:
           # 拉取 KernelSU 源码
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
 
-          # 针对 40545 版本管理器进行硬编码适配
+          # 针对指定版本管理器进行硬编码适配
           cd KernelSU
           echo "Overriding KernelSU version to ${{ github.event.inputs.KSU_MANAGER_VER }}"
           echo "${{ github.event.inputs.KSU_MANAGER_VER }}" > VERSION
           
-          # 修改 Makefile，强制 KSU_VERSION 为 40545
-          sed -i 's/ccflags-y += -DKSU_VERSION=.*/ccflags-y += -DKSU_VERSION=\"${{ github.event.inputs.KSU_MANAGER_VER }}\"/' Makefile
-          sed -i 's/$(shell.*)/${{ github.event.inputs.KSU_MANAGER_VER }}/g' Makefile
+          # 修复点 1：覆盖官方的版本号获取脚本（最稳定的方法）
+          echo "#!/bin/bash" > scripts/ksu_version.sh
+          echo "echo ${{ github.event.inputs.KSU_MANAGER_VER }}" >> scripts/ksu_version.sh
+          chmod +x scripts/ksu_version.sh
+          
+          # 修复点 2：指定正确的路径 (kernel/Makefile) 替换变量
+          sed -i 's/ccflags-y += -DKSU_VERSION=.*/ccflags-y += -DKSU_VERSION=\"${{ github.event.inputs.KSU_MANAGER_VER }}\"/' kernel/Makefile
+          sed -i 's/$(shell.*)/${{ github.event.inputs.KSU_MANAGER_VER }}/g' kernel/Makefile
+          
           cd ..
 
       - name: Integrate SUSFS
