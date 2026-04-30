@@ -74,22 +74,24 @@ jobs:
           
           cd ..
 
-      - name: Integrate SUSFS
+      - name: Integrate KernelSU & Override Manager Version
         run: |
-          # 假设当前 GitHub 仓库中包含 susfs 的源码/补丁目录 (与 LantoZheng 仓库结构类似)
-          # 复制 SUSFS 源码到内核树
-          cp -r ${GITHUB_WORKSPACE}/susfs/kernel_patches/fs/* android-kernel/common/fs/
-          cp -r ${GITHUB_WORKSPACE}/susfs/kernel_patches/include/linux/* android-kernel/common/include/linux/
-          
           cd android-kernel/common
           
-          # 应用 SUSFS 针对 Kernel 6.6 的补丁
-          echo "Applying SUSFS 6.6 patches..."
-          patch -p1 < ${GITHUB_WORKSPACE}/susfs/kernel_patches/50_recipe_susfs.patch
-          patch -p1 < ${GITHUB_WORKSPACE}/susfs/kernel_patches/susfs_core.patch
+          # 拉取 KernelSU 源码
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+
+          # 针对指定版本管理器进行硬编码适配
+          cd KernelSU
+          echo "Overriding KernelSU version to ${{ github.event.inputs.KSU_MANAGER_VER }}"
+          echo "${{ github.event.inputs.KSU_MANAGER_VER }}" > VERSION
           
-          # 如果有专门针对 KernelSU 的 SUSFS 钩子补丁，也在此处应用
-          # patch -p1 < ${GITHUB_WORKSPACE}/susfs/kernel_patches/susfs_ksu.patch
+          # 覆盖官方的版本号获取脚本（这是最稳定且不会引起 SUSFS 补丁冲突的方法）
+          echo "#!/bin/bash" > scripts/ksu_version.sh
+          echo "echo ${{ github.event.inputs.KSU_MANAGER_VER }}" >> scripts/ksu_version.sh
+          chmod +x scripts/ksu_version.sh
+          
+          cd ..
 
       - name: Build Kernel (Bazel / Kleaf)
         run: |
